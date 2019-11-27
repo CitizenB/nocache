@@ -14,16 +14,24 @@ Use case: backup processes that should not interfere with the present
 state of the cache.
 
 
-Install and Use
----------------
+Installation and Usage
+----------------------
 
 Just type `make`. Then, prepend `./nocache` to your command:
 
     ./nocache cp -a ~/ /mnt/backup/home-$(hostname)
 
-You can also put the `nocache.so` file to a location like
-`/usr/local/lib` and do `LD_PRELOAD=/usr/local/lib/nocache.so`.
-(This is what the `install` target will do.)
+The command `make install` will install the shared library, man
+pages and the `nocache`, `cachestats` and `cachedel` commands
+under `/usr/local`. You can specify an alternate prefix by using
+`make install PREFIX=/usr`.
+
+Debian packages are available, see https://packages.qa.debian.org/n/nocache.html.
+
+Please note that `nocache` will only build on a system that has
+support for the `posix_fadvise` syscall and exposes it, too. This
+should be the case on most modern Unices, but kfreebsd notably has no
+support for this as of now.
 
 
 Testing
@@ -34,6 +42,8 @@ For testing purposes, I included two small tools:
 * `cachedel` calls `posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED)` on
   the file argument. Thus, if the file is not accessed by any other
   application, the pages will be eradicated from the fs cache.
+  Specifying -n <number> will repeat the syscall the given number of
+  times which can be useful in some circumstances (see below).
 * `cachestats` has three modes: In quiet mode (`-q`), the exit status
   is 0 (success) if the file is fully cached. In normal mode,
   the number of cached vs. not-cached pages is printed. In verbose
@@ -53,6 +63,10 @@ It looks like this:
 
 Also, you can use `vmstat 1` to view cache statistics.
 
+For debugging purposes, you can specify a filename that `nocache` should log
+debugging messages to via the `-D` command line switch, e.g. use `nocache
+-D /tmp/nocache.log …`. Note that for simple testing the file `/dev/stderr`
+might be a good choice.
 
 Example run
 -----------
@@ -94,9 +108,54 @@ There are timing issues to consider, as well. If you consider `nocache
 cat <file>`, in most (all?) cases the cache will not be restored. For
 discussion and possible solutions see <http://lwn.net/Articles/480930/>.
 My experience showed that in many cases you could "fix" this by doing
-the `posix_fadvise` call *twice*. If you want this behaviour, compile
-the library using `make CFLAGS=-DDOUBLEFADVISE`.
+the `posix_fadvise` call *twice*. For both tools `nocache` and
+`cachedel` you can specify the number using `-n`, like so:
 
+    $ nocache -n 2 cat ~/file.mp3
+
+This actually only sets the environment variable `NOCACHE_NR_FADVISE`
+to the specified value, and the shared library reads out this value.
+If test number 3 in `t/basic.t` fails, then try increasing this number
+until it works, e.g.:
+
+    $ env NOCACHE_NR_FADVISE=2 make test
+
+
+One could also consider that the fact pages are kept mean the kernel
+considers they are hot, and decide the overhead of allocating one byte
+per page for mincore and the actual mincore calls are not worth it when
+the kernel actually does keep some pages when it wants to.
+
+In this case you can either run `nocache` with `-f` or set the
+`NOCACHE_FLUSHALL` environment variable to 1, e.g.:
+
+    $ nocache -f cat ~/file.mp3
+    $ env NOCACHE_FLUSHALL=1 make test
+
+By default `nocache` will only keep track of file descriptors less than 1
+million that are opened by your application, in order to bound its memory
+consumption. If you want to change this threshold, you can supply the
+environment variable `NOCACHE_MAX_FDS` and set it to a higher (or lower) value.
+
+
+Alternate Approaches
+--------------------
+
+If you have a fairly recent Linux kernel, you can also try to simply
+cage a cache-intensive application in a memory-limited cgroup. For
+example, I use the following command in the startup part of my backup
+script:
+
+    sudo env ppid=$$ sh -c '
+        cgcreate -g memory:backup ;
+        cgcreate -g blkio:backup ;
+        echo 256M > /sys/fs/cgroup/memory/backup/memory.limit_in_bytes ;
+        echo 100 > /sys/fs/cgroup/blkio/backup/blkio.weight ;
+        echo $ppid > /sys/fs/cgroup/memory/backup/tasks ;
+        echo $ppid > /sys/fs/cgroup/blkio/backup/tasks ;
+    '
+
+More info: https://www.kernel.org/doc/Documentation/cgroup-v1/memory.txt
 
 Acknowledgements
 ----------------
